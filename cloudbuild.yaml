@@ -1,0 +1,34 @@
+steps:
+  # 1. Authenticate using the service account key from Secret Manager
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        gcloud secrets versions access latest --secret="service-account-key" --project="269943592630" > /workspace/key.json
+        gcloud auth activate-service-account --key-file=/workspace/key.json
+    id: 'Authenticate with service account'
+
+  # 2. Build the Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args: [ 'build', '-t', 'us-west1-docker.pkg.dev/cloud-66c6b/ai-idea-generator-ko/ai-idea-generator-ko:$SHORT_SHA', '.' ]
+
+  # 3. Push the Docker image to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: [ 'push', 'us-west1-docker.pkg.dev/cloud-66c6b/ai-idea-generator-ko/ai-idea-generator-ko:$SHORT_SHA' ]
+
+  # 4. Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
+    entrypoint: 'gcloud'
+    args:
+      - 'run'
+      - 'deploy'
+      - 'ai-idea-generator-ko'
+      - '--image=us-west1-docker.pkg.dev/cloud-66c6b/ai-idea-generator-ko/ai-idea-generator-ko:$SHORT_SHA'
+      - '--region=us-west1'
+      - '--platform=managed'
+      - '--project=cloud-66c6b'
+      - '--allow-unauthenticated'
+
+images:
+  - 'us-west1-docker.pkg.dev/cloud-66c6b/ai-idea-generator-ko/ai-idea-generator-ko:$SHORT_SHA' 

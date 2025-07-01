@@ -4,15 +4,21 @@ import { useState, useEffect } from "react"
 import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { Heart, Clock } from "lucide-react"
+import { Heart, Clock, Database, RefreshCw, Trash2 } from "lucide-react"
 import { marked } from 'marked'
+import { db } from "@/lib/firebase";
+import { collection, addDoc, serverTimestamp, query, where, orderBy, getDocs, limit, deleteDoc, doc, updateDoc } from "firebase/firestore";
+import { useAuthUser } from "@/hooks/useAuthUser";
 
-interface LikedIdea {
+interface FirestoreIdea {
   id: string
-  title: string
   content: string
-  timestamp: number
   category: string
+  liked: boolean
+  createdAt: any
+  userId: string
+  userEmail: string
+  userDisplayName: string | null
 }
 
 export default function Component() {
@@ -20,28 +26,151 @@ export default function Component() {
   const [isGenerating, setIsGenerating] = useState(false)
   const [generatedIdea, setGeneratedIdea] = useState<string>("")
   const [error, setError] = useState<string>("")
-  const [likedIdeas, setLikedIdeas] = useState<LikedIdea[]>([])
   const [isLiked, setIsLiked] = useState(false)
-  const [selectedLikedIdea, setSelectedLikedIdea] = useState<LikedIdea | null>(null)
-
-  // 컴포넌트 마운트 시 localStorage에서 좋아요한 아이디어들 로드
-  useEffect(() => {
-    const savedLikedIdeas = localStorage.getItem('likedIdeas')
-    if (savedLikedIdeas) {
-      setLikedIdeas(JSON.parse(savedLikedIdeas))
-    }
-  }, [])
-
-  // 좋아요한 아이디어들이 변경될 때마다 localStorage에 저장
-  useEffect(() => {
-    localStorage.setItem('likedIdeas', JSON.stringify(likedIdeas))
-  }, [likedIdeas])
+  const [selectedFirestoreIdea, setSelectedFirestoreIdea] = useState<FirestoreIdea | null>(null)
+  const [firestoreIdeas, setFirestoreIdeas] = useState<FirestoreIdea[]>([])
+  const [isLoadingFirestore, setIsLoadingFirestore] = useState(false)
+  const [currentIdeaId, setCurrentIdeaId] = useState<string | null>(null)
+  const { user } = useAuthUser();
 
   // 새 아이디어가 생성될 때마다 좋아요 상태 초기화 및 선택된 아이디어 초기화
   useEffect(() => {
     setIsLiked(false)
-    setSelectedLikedIdea(null)
+    setSelectedFirestoreIdea(null)
   }, [generatedIdea])
+
+  // 사용자가 로그인했을 때 Firestore 아이디어들 불러오기
+  useEffect(() => {
+    if (user) {
+      loadFirestoreIdeas();
+    } else {
+      setFirestoreIdeas([]);
+    }
+  }, [user])
+
+  // Firestore에서 사용자의 아이디어들 불러오기
+  const loadFirestoreIdeas = async () => {
+    if (!user) {
+      console.log("[Firestore] 사용자가 로그인하지 않아 불러오기를 건너뜁니다.");
+      return;
+    }
+
+    setIsLoadingFirestore(true);
+    try {
+      const q = query(
+        collection(db, "ideas"),
+        where("userId", "==", user.uid),
+        orderBy("createdAt", "desc"),
+        limit(20)
+      );
+      
+      const querySnapshot = await getDocs(q);
+      const ideas: FirestoreIdea[] = [];
+      
+      querySnapshot.forEach((doc) => {
+        ideas.push({
+          id: doc.id,
+          ...doc.data()
+        } as FirestoreIdea);
+      });
+      
+      setFirestoreIdeas(ideas);
+      console.log(`✅ [Firestore] ${ideas.length}개의 아이디어를 불러왔습니다.`);
+    } catch (error: any) {
+      console.error("❌ [Firestore] 불러오기 오류:", error);
+      
+      if (error.code === 'permission-denied') {
+        console.error("권한 오류: Firestore 보안 규칙을 확인하세요.");
+      } else if (error.code === 'failed-precondition') {
+        console.error("인덱스가 필요할 수 있습니다. Firebase 콘솔을 확인하세요.");
+      }
+    } finally {
+      setIsLoadingFirestore(false);
+    }
+  };
+
+  // Firestore에 아이디어 저장 함수
+  const saveIdeaToFirestore = async (ideaContent: string, category: string, liked: boolean = false) => {
+    // 사용자가 로그인하지 않은 경우 Firestore 저장 건너뛰기
+    if (!user) {
+      console.log("[Firestore] 사용자가 로그인하지 않아 저장을 건너뜁니다.");
+      return null;
+    }
+
+    try {
+      console.log("[Firestore] 저장 시도", {
+        content: ideaContent.substring(0, 100) + "...", // 로그에는 일부만 표시
+        category,
+        liked,
+        userId: user.uid
+      });
+      
+      const docRef = await addDoc(collection(db, "ideas"), {
+        content: ideaContent,
+        category,
+        liked,
+        createdAt: serverTimestamp(),
+        userId: user.uid,
+        userEmail: user.email,
+        userDisplayName: user.displayName || null
+      });
+      
+      console.log("✅ [Firestore] 저장 성공! 문서 ID:", docRef.id);
+      
+      // 저장 후 목록 새로고침
+      loadFirestoreIdeas();
+      return docRef.id;
+    } catch (error: any) {
+      console.error("❌ [Firestore] 저장 오류:", error);
+      
+      // 에러 타입별 상세 로깅
+      if (error.code === 'permission-denied') {
+        console.error("권한 오류: Firestore 보안 규칙을 확인하세요.");
+      } else if (error.code === 'unavailable') {
+        console.error("서비스 사용 불가: 네트워크 연결을 확인하세요.");
+      } else if (error.code === 'failed-precondition') {
+        console.error("Firestore 데이터베이스가 생성되지 않았을 수 있습니다.");
+      }
+      
+      return null;
+    }
+  };
+
+  // Firestore에서 아이디어 삭제 함수
+  const deleteIdeaFromFirestore = async (ideaId: string) => {
+    if (!user) {
+      console.log("[Firestore] 사용자가 로그인하지 않아 삭제를 건너뜁니다.");
+      return;
+    }
+
+    try {
+      console.log("[Firestore] 삭제 시도", { ideaId });
+      
+      await deleteDoc(doc(db, "ideas", ideaId));
+      
+      console.log("✅ [Firestore] 삭제 성공! 문서 ID:", ideaId);
+      
+      // 삭제 후 목록 새로고침
+      loadFirestoreIdeas();
+    } catch (error: any) {
+      console.error("❌ [Firestore] 삭제 오류:", error);
+      
+      if (error.code === 'permission-denied') {
+        console.error("권한 오류: 해당 아이디어를 삭제할 권한이 없습니다.");
+      } else if (error.code === 'not-found') {
+        console.error("문서를 찾을 수 없습니다.");
+      }
+    }
+  };
+
+  // 삭제 확인 및 실행 함수
+  const handleDeleteIdea = async (ideaId: string, ideaTitle: string) => {
+    const confirmDelete = window.confirm(`"${ideaTitle}"을(를) 삭제하시겠습니까?\n\n이 작업은 되돌릴 수 없습니다.`);
+    
+    if (confirmDelete) {
+      await deleteIdeaFromFirestore(ideaId);
+    }
+  };
 
   const handleGenerateIdea = async () => {
     if (!selectedCategory) {
@@ -52,7 +181,8 @@ export default function Component() {
     setIsGenerating(true)
     setError("")
     setGeneratedIdea("")
-    setSelectedLikedIdea(null)
+    setSelectedFirestoreIdea(null)
+    setCurrentIdeaId(null)
     
     try {
       const response = await fetch('/api/generate-idea', {
@@ -70,6 +200,9 @@ export default function Component() {
       if (data.success) {
         console.log('프론트엔드: API 호출 성공', data)
         setGeneratedIdea(data.content)
+        // Firestore 저장 (생성 시 liked=false) 및 문서 ID 저장
+        const docId = await saveIdeaToFirestore(data.content, selectedCategory, false)
+        setCurrentIdeaId(docId)
       } else {
         console.error('API 오류:', data.error)
         setError(data.error || '아이디어 생성 중 오류가 발생했습니다.')
@@ -107,30 +240,34 @@ export default function Component() {
     return firstLine || "제목 없음"
   }
 
-  // 좋아요 버튼 클릭 핸들러
-  const handleLikeIdea = () => {
-    if (!generatedIdea || isLiked) return
-    
-    const title = extractTitleFromMarkdown(generatedIdea)
-    const newLikedIdea: LikedIdea = {
-      id: Date.now().toString(),
-      title: title,
-      content: generatedIdea,
-      timestamp: Date.now(),
-      category: selectedCategory
-    }
-    
-    // 새 아이디어를 맨 앞에 추가하고 10개까지만 유지
-    setLikedIdeas(prev => [newLikedIdea, ...prev].slice(0, 10))
-    setIsLiked(true)
-  }
-
-  // 좋아요한 아이디어 클릭 핸들러
-  const handleSelectLikedIdea = (idea: LikedIdea) => {
-    console.log('좋아요한 아이디어 클릭:', idea.title)
-    setSelectedLikedIdea(idea)
+  // 저장된 아이디어 클릭 핸들러
+  const handleSelectFirestoreIdea = (idea: FirestoreIdea) => {
+    console.log('저장된 아이디어 클릭:', extractTitleFromMarkdown(idea.content))
+    setSelectedFirestoreIdea(idea)
     setGeneratedIdea("")
     setError("")
+    setCurrentIdeaId(idea.id)
+    setIsLiked(idea.liked)
+  }
+
+  // 좋아요 버튼 클릭 핸들러
+  const handleLikeIdea = async () => {
+    if (!generatedIdea || isLiked || !currentIdeaId || !user) return
+    
+    try {
+      // Firestore 문서 업데이트
+      await updateDoc(doc(db, "ideas", currentIdeaId), {
+        liked: true
+      });
+      
+    setIsLiked(true)
+      console.log("✅ [Firestore] 좋아요 업데이트 성공! 문서 ID:", currentIdeaId);
+      
+      // 목록 새로고침
+      loadFirestoreIdeas();
+    } catch (error: any) {
+      console.error("❌ [Firestore] 좋아요 업데이트 오류:", error);
+    }
   }
 
   // 마크다운을 HTML로 변환
@@ -165,9 +302,9 @@ export default function Component() {
   }
 
   // 현재 표시할 아이디어와 카테고리 결정
-  const currentIdea = selectedLikedIdea?.content || generatedIdea
-  const currentCategory = selectedLikedIdea?.category || selectedCategory
-  const isFromLikedList = !!selectedLikedIdea
+  const currentIdea = selectedFirestoreIdea?.content || generatedIdea
+  const currentCategory = selectedFirestoreIdea?.category || selectedCategory
+  const isFromFirestoreList = !!selectedFirestoreIdea
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100">
@@ -200,86 +337,123 @@ export default function Component() {
                 </label>
                 <Select value={selectedCategory} onValueChange={setSelectedCategory}>
                   <SelectTrigger className="w-full h-12 text-base text-left">
-                    <SelectValue placeholder="카테고리 선택" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="startup">스타트업 아이디어</SelectItem>
-                    <SelectItem value="business-automation">비즈니스 자동화 아이디어</SelectItem>
-                    <SelectItem value="blog">블로그 아이디어</SelectItem>
-                    <SelectItem value="youtube">유튜브 아이디어</SelectItem>
-                    <SelectItem value="project">프로젝트 아이디어</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
+                <SelectValue placeholder="카테고리 선택" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="startup">스타트업 아이디어</SelectItem>
+                <SelectItem value="business-automation">비즈니스 자동화 아이디어</SelectItem>
+                <SelectItem value="blog">블로그 아이디어</SelectItem>
+                <SelectItem value="youtube">유튜브 아이디어</SelectItem>
+                <SelectItem value="project">프로젝트 아이디어</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
 
-              <Button
-                size="lg"
+          <Button
+            size="lg"
                 onClick={handleGenerateIdea}
                 disabled={isGenerating}
                 className="w-full text-lg px-8 py-6 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 shadow-lg hover:shadow-xl transition-all duration-200 transform hover:scale-105 disabled:opacity-50 disabled:transform-none"
-              >
+          >
                 {isGenerating ? "아이디어 생성 중..." : "아이디어 생성"}
               </Button>
             </CardContent>
           </Card>
 
-          {/* Recently Liked Ideas */}
-          <Card className="shadow-lg border-0 bg-white/80 backdrop-blur-sm flex-1">
-            <CardHeader className="bg-gradient-to-r from-pink-600 to-rose-600 text-white rounded-t-lg p-6">
-              <CardTitle className="text-xl font-bold text-center flex items-center justify-center gap-2">
-                <Heart className="w-5 h-5" />
-                Recently Liked Ideas
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="p-6">
-              {likedIdeas.length === 0 ? (
-                <div className="text-center text-gray-500 py-8">
-                  <Heart className="w-12 h-12 mx-auto mb-3 text-gray-300" />
-                  <p className="text-center">아직 좋아요한 아이디어가 없습니다.</p>
-                  <p className="text-sm mt-1 text-center">아이디어를 생성하고 하트를 눌러보세요!</p>
-                </div>
-              ) : (
-                <div className="space-y-3 max-h-96 overflow-y-auto">
-                  {likedIdeas.map((idea) => (
-                    <div 
-                      key={idea.id} 
-                      className={`p-4 rounded-lg border transition-all cursor-pointer hover:shadow-md select-none ${
-                        selectedLikedIdea?.id === idea.id 
-                          ? 'bg-gradient-to-r from-pink-100 to-rose-100 border-pink-300 ring-2 ring-pink-300' 
-                          : 'bg-gradient-to-r from-pink-50 to-rose-50 border-pink-200 hover:border-pink-300 hover:bg-gradient-to-r hover:from-pink-100 hover:to-rose-100'
-                      }`}
-                      onClick={() => handleSelectLikedIdea(idea)}
-                      role="button"
-                      tabIndex={0}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' || e.key === ' ') {
-                          handleSelectLikedIdea(idea)
-                        }
-                      }}
-                    >
-                      <div className="flex items-start gap-3 pointer-events-none">
-                        <Heart className="w-4 h-4 text-pink-500 mt-0.5 flex-shrink-0" fill="currentColor" />
-                        <div className="flex-1 min-w-0">
-                          <p className="text-sm font-medium text-gray-900 line-clamp-2 leading-tight transition-colors text-left">
-                            {idea.title}
-                          </p>
-                          <div className="flex items-center gap-2 mt-2">
-                            <span className="text-xs text-pink-600 bg-pink-100 px-2 py-0.5 rounded-full">
-                              {getCategoryDisplayName(idea.category)}
-                            </span>
-                            <div className="flex items-center gap-1 text-xs text-gray-500">
-                              <Clock className="w-3 h-3" />
-                              {formatTimeAgo(idea.timestamp)}
+          {/* 나의 아이디어 */}
+          {user && (
+            <Card className="shadow-lg border-0 bg-white/80 backdrop-blur-sm flex-1">
+              <CardHeader className="bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-t-lg p-6">
+                <CardTitle className="text-xl font-bold text-center flex items-center justify-center gap-2">
+                  <Database className="w-5 h-5" />
+                  나의 아이디어
+                  <Button
+                    onClick={loadFirestoreIdeas}
+                    disabled={isLoadingFirestore}
+                    variant="ghost"
+                    size="sm"
+                    className="text-white hover:bg-white/20 ml-2 p-1"
+                  >
+                    <RefreshCw className={`w-4 h-4 ${isLoadingFirestore ? 'animate-spin' : ''}`} />
+                  </Button>
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="p-6">
+                {isLoadingFirestore ? (
+                  <div className="text-center text-gray-500 py-8">
+                    <RefreshCw className="w-12 h-12 mx-auto mb-3 text-gray-300 animate-spin" />
+                    <p className="text-center">클라우드에서 아이디어를 불러오는 중...</p>
+                  </div>
+                ) : firestoreIdeas.length === 0 ? (
+                  <div className="text-center text-gray-500 py-8">
+                    <Database className="w-12 h-12 mx-auto mb-3 text-gray-300" />
+                    <p className="text-center">아직 저장된 아이디어가 없습니다.</p>
+                    <p className="text-sm mt-1 text-center">로그인한 상태에서 아이디어를 생성하면 자동으로 저장됩니다!</p>
+                  </div>
+                ) : (
+                  <div className="space-y-3 max-h-96 overflow-y-auto">
+                    {firestoreIdeas.map((idea) => (
+                      <div 
+                        key={idea.id} 
+                        className="p-4 rounded-lg border bg-gradient-to-r from-blue-50 to-indigo-50 border-blue-200 hover:border-blue-300 hover:bg-gradient-to-r hover:from-blue-100 hover:to-indigo-100 transition-all hover:shadow-md select-none group"
+                        role="button"
+                        tabIndex={0}
+                      >
+                        <div className="flex items-start gap-3">
+                          <Database className="w-4 h-4 text-blue-500 mt-0.5 flex-shrink-0" />
+                          <div 
+                            className="flex-1 min-w-0 cursor-pointer"
+                            onClick={() => {
+                              handleSelectFirestoreIdea(idea);
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' || e.key === ' ') {
+                                handleSelectFirestoreIdea(idea);
+                              }
+                            }}
+                          >
+                            <p className="text-sm font-medium text-gray-900 line-clamp-2 leading-tight transition-colors text-left">
+                              {extractTitleFromMarkdown(idea.content)}
+                            </p>
+                            <div className="flex items-center gap-2 mt-2">
+                              <span className="text-xs text-blue-600 bg-blue-100 px-2 py-0.5 rounded-full">
+                                {getCategoryDisplayName(idea.category)}
+                              </span>
+                              {idea.liked && (
+                                <span className="text-xs text-pink-600 bg-pink-100 px-2 py-0.5 rounded-full flex items-center gap-1">
+                                  <Heart className="w-3 h-3" fill="currentColor" />
+                                  Liked
+                                </span>
+                              )}
+                              <div className="flex items-center gap-1 text-xs text-gray-500">
+                                <Clock className="w-3 h-3" />
+                                {idea.createdAt?.toDate ? 
+                                  formatTimeAgo(idea.createdAt.toDate().getTime()) : 
+                                  '알 수 없음'
+                                }
+                              </div>
                             </div>
                           </div>
+                          <Button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteIdea(idea.id, extractTitleFromMarkdown(idea.content));
+                            }}
+                            variant="ghost"
+                            size="sm"
+                            className="opacity-0 group-hover:opacity-100 transition-opacity text-red-500 hover:text-red-700 hover:bg-red-50 p-1 flex-shrink-0"
+                            title="아이디어 삭제"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </Button>
                         </div>
                       </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
 
           {/* 사용 팁 */}
           <Card className="shadow-lg border-0 bg-white/80 backdrop-blur-sm">
@@ -313,22 +487,22 @@ export default function Component() {
           {currentIdea && (
             <Card className="shadow-xl border-0 bg-white h-full overflow-hidden">
               <CardHeader className={`text-white p-6 ${
-                isFromLikedList 
+                isFromFirestoreList 
                   ? 'bg-gradient-to-r from-pink-600 to-rose-600' 
                   : 'bg-gradient-to-r from-green-600 to-emerald-600'
               }`}>
                 <div className="flex items-center justify-between">
                   <div className="flex-1">
                     <CardTitle className="text-2xl font-bold text-left leading-tight">
-                      {isFromLikedList ? '💖' : '✨'} {getCategoryDisplayName(currentCategory)}
-                      {isFromLikedList && (
+                      {isFromFirestoreList ? '💖' : '✨'} {getCategoryDisplayName(currentCategory)}
+                      {isFromFirestoreList && (
                         <span className="text-lg font-normal ml-2 opacity-90 block mt-1">
                           (저장된 아이디어)
                         </span>
                       )}
                     </CardTitle>
                   </div>
-                  {!isFromLikedList && (
+                  {!isFromFirestoreList && (
                     <div className="flex-shrink-0 ml-4">
                       <Button
                         onClick={handleLikeIdea}
@@ -343,7 +517,7 @@ export default function Component() {
                         <span className="ml-2">
                           {isLiked ? '좋아요 완료!' : '좋아요'}
                         </span>
-                      </Button>
+          </Button>
                     </div>
                   )}
                 </div>

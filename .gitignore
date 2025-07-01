@@ -41,3 +41,7 @@ shrinkwrap.yaml
 # misc
 *.local
 *.log
+
+service-account-key.json
+
+lib/firebase.ts
